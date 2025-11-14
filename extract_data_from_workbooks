@@ -1,0 +1,273 @@
+' VBA code to pull tune-up data from individual workbooks
+
+Sub UpdateFileReferences()
+    Dim sourceFolder As String
+    Dim templateRow As Long
+    Dim currentRow As Long
+    Dim fileName As String
+    Dim oldFileName As String
+    Dim ws As Worksheet
+    Dim cell As Range
+    Dim fso As Object
+    Dim folder As Object
+    Dim file As Object
+    
+    ' Set the worksheet
+    Set ws = ActiveSheet
+    
+    ' Prompt user for the folder containing the files
+    With Application.FileDialog(msoFileDialogFolderPicker)
+        .Title = "Select Folder Containing Excel Files"
+        .AllowMultiSelect = False
+        If .Show = -1 Then
+            sourceFolder = .SelectedItems(1)
+        Else
+            MsgBox "No folder selected. Macro cancelled.", vbExclamation
+            Exit Sub
+        End If
+    End With
+    
+    ' Set template row (assuming row 2 is the template)
+    templateRow = 2
+    
+    ' Prompt user for the old file name to replace
+    oldFileName = InputBox("Enter the old file name (including .xlsx extension) that appears in your formulas:" & vbCrLf & vbCrLf & "Example: OldFile.xlsx", "Old File Name")
+    If oldFileName = "" Then
+        MsgBox "No file name entered. Macro cancelled.", vbExclamation
+        Exit Sub
+    End If
+    
+    ' Initialize FileSystemObject
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    Set folder = fso.GetFolder(sourceFolder)
+    
+    ' Turn off screen updating for better performance
+    Application.ScreenUpdating = False
+    Application.Calculation = xlCalculationManual
+    Application.AskToUpdateLinks = False ' Prevent asking to update links
+    Application.DisplayAlerts = False ' Suppress alerts
+    
+    ' Count total Excel files first
+    Dim totalFiles As Long
+    Dim processedFiles As Long
+    Dim filesAdded As Long
+    totalFiles = 0
+    processedFiles = 0
+    filesAdded = 0
+    
+    For Each file In folder.Files
+        If LCase(Right(file.Name, 5)) = ".xlsx" Or LCase(Right(file.Name, 4)) = ".xls" Or LCase(Right(file.Name, 5)) = ".xlsm" Then
+            If Left(file.Name, 1) <> "~" And file.Name <> ThisWorkbook.Name Then
+                totalFiles = totalFiles + 1
+            End If
+        End If
+    Next file
+    
+    If totalFiles = 0 Then
+        MsgBox "No Excel files found in the selected folder.", vbExclamation
+        Application.ScreenUpdating = True
+        Application.Calculation = xlCalculationAutomatic
+        Exit Sub
+    End If
+    
+    ' Start from the row after template
+    currentRow = templateRow + 1
+    
+    ' Loop through all files in the folder
+    For Each file In folder.Files
+        ' Check if it's an Excel file
+        If LCase(Right(file.Name, 5)) = ".xlsx" Or LCase(Right(file.Name, 4)) = ".xls" Or LCase(Right(file.Name, 5)) = ".xlsm" Then
+            
+            ' Skip temporary files and the current workbook
+            If Left(file.Name, 1) <> "~" And file.Name <> ThisWorkbook.Name Then
+                
+                On Error Resume Next ' Handle any errors that occur during processing
+                
+                processedFiles = processedFiles + 1
+                
+                ' Update status bar with progress
+                Application.StatusBar = "Processing file " & processedFiles & " of " & totalFiles & ": " & file.Name
+                
+                ' Insert a new row below the current position
+                ws.Rows(currentRow).Insert Shift:=xlDown, CopyOrigin:=xlFormatFromLeftOrAbove
+                
+                ' Copy all content from template row (formulas, formats, values)
+                ws.Rows(templateRow).Copy
+                ws.Rows(currentRow).PasteSpecial Paste:=xlPasteAll
+                Application.CutCopyMode = False
+                
+                ' Update all formulas in the current row
+                Dim formulaText As String
+                Dim originalFormula As String
+                Dim hasFormulas As Boolean
+                Dim cellCount As Long
+                hasFormulas = False
+                cellCount = 0
+                
+                For Each cell In ws.Rows(currentRow).Cells
+                    If cell.Column > 256 Then Exit For ' Only check first 256 columns for performance
+                    
+                    If cell.HasFormula Then
+                        hasFormulas = True
+                        cellCount = cellCount + 1
+                        
+                        ' Get the formula as regular text (A1 notation)
+                        originalFormula = cell.Formula
+                        
+                        ' Replace the old file name with the new one in the formula
+                        formulaText = Replace(originalFormula, oldFileName, file.Name)
+                        
+                        ' Convert all cell references to absolute references
+                        formulaText = ConvertToAbsoluteReferences(formulaText)
+                        
+                        ' Set the formula back
+                        cell.Formula = formulaText
+                    End If
+                Next cell
+                
+                ' Check if there was an error
+                If Err.Number <> 0 Then
+                    Application.StatusBar = "Error processing: " & file.Name & " - Error: " & Err.Description
+                    ws.Rows(currentRow).Delete ' Remove the partially processed row
+                    Err.Clear
+                    DoEvents ' Allow screen to update
+                Else
+                    ' Move to next row only if successful
+                    filesAdded = filesAdded + 1
+                    currentRow = currentRow + 1
+                    
+                    ' Show progress every 10 files
+                    If filesAdded Mod 10 = 0 Then
+                        DoEvents ' Allow screen to refresh
+                    End If
+                End If
+                
+                On Error GoTo 0 ' Turn off error handling
+            End If
+        End If
+    Next file
+    
+    ' Clear status bar
+    Application.StatusBar = False
+    
+    ' Clean up
+    Set fso = Nothing
+    Set folder = Nothing
+    
+    ' Turn screen updating back on
+    Application.Calculation = xlCalculationAutomatic
+    Application.ScreenUpdating = True
+    Application.AskToUpdateLinks = True
+    Application.DisplayAlerts = True
+    
+    MsgBox "File references updated successfully!" & vbCrLf & vbCrLf & _
+           "Total files processed: " & processedFiles & vbCrLf & _
+           "Total rows created: " & filesAdded, vbInformation
+    
+End Sub
+
+Function ConvertToAbsoluteReferences(formula As String) As String
+    Dim i As Long
+    Dim char As String
+    Dim prevChar As String
+    Dim result As String
+    Dim inQuotes As Boolean
+    Dim columnPart As String
+    Dim rowPart As String
+    Dim j As Long
+    
+    result = ""
+    inQuotes = False
+    i = 1
+    
+    Do While i <= Len(formula)
+        char = Mid(formula, i, 1)
+        
+        ' Track if we're inside quotes (for text strings)
+        If char = """" Then
+            inQuotes = Not inQuotes
+            result = result & char
+            i = i + 1
+        ' Skip if we're in quotes
+        ElseIf inQuotes Then
+            result = result & char
+            i = i + 1
+        ' Check for potential cell reference (letter following certain characters)
+        ElseIf IsLetter(char) Then
+            
+            ' Get previous character
+            If i > 1 Then
+                prevChar = Mid(formula, i - 1, 1)
+            Else
+                prevChar = ""
+            End If
+            
+            ' Check if this could be start of a cell reference
+            If i = 1 Or prevChar = "!" Or prevChar = "," Or prevChar = "(" Or _
+               prevChar = ":" Or prevChar = " " Or prevChar = "=" Or prevChar = "+" Or _
+               prevChar = "-" Or prevChar = "*" Or prevChar = "/" Or prevChar = "&" Or _
+               prevChar = "<" Or prevChar = ">" Or prevChar = ";" Then
+                
+                ' Extract column letters
+                columnPart = ""
+                j = i
+                Do While j <= Len(formula) And IsLetter(Mid(formula, j, 1))
+                    columnPart = columnPart & Mid(formula, j, 1)
+                    j = j + 1
+                Loop
+                
+                ' Check if followed by a number (making it a valid cell reference)
+                rowPart = ""
+                Do While j <= Len(formula) And IsNumeric(Mid(formula, j, 1))
+                    rowPart = rowPart & Mid(formula, j, 1)
+                    j = j + 1
+                Loop
+                
+                ' If we have both column and row, it's a cell reference
+                If Len(columnPart) > 0 And Len(rowPart) > 0 And Len(columnPart) <= 3 Then
+                    ' Add $ signs if not already present
+                    If prevChar <> "$" Then
+                        result = result & "$"
+                    End If
+                    result = result & columnPart
+                    
+                    ' Check if there's already a $ before the row number
+                    If Mid(formula, i + Len(columnPart), 1) <> "$" Then
+                        result = result & "$"
+                    End If
+                    result = result & rowPart
+                    
+                    i = j
+                Else
+                    ' Not a cell reference, just add the character
+                    result = result & char
+                    i = i + 1
+                End If
+            Else
+                result = result & char
+                i = i + 1
+            End If
+        Else
+            result = result & char
+            i = i + 1
+        End If
+    Loop
+    
+    ConvertToAbsoluteReferences = result
+End Function
+
+Function IsLetter(char As String) As Boolean
+    If Len(char) = 1 Then
+        IsLetter = (Asc(UCase(char)) >= 65 And Asc(UCase(char)) <= 90)
+    Else
+        IsLetter = False
+    End If
+End Function
+
+Function IsNumeric(char As String) As Boolean
+    If Len(char) = 1 Then
+        IsNumeric = (Asc(char) >= 48 And Asc(char) <= 57)
+    Else
+        IsNumeric = False
+    End If
+End Function
